@@ -1,0 +1,10 @@
+
+{
+  "task": "finfact",
+  "labels": ["True", "False", "Not Enough Information"],
+  "top_k": 5,
+  "rrf_k": 60,
+  "chunk_size": 320,
+  "chunk_overlap": 64,
+  "bm25": {"k1": 1.5, "b": 0.75}
+}

@@ -1,0 +1,11 @@
+{
+    "task": "finguard",
+    "labels": ["True", "False"],
+    "map": {"Real": "True", "Fake": "False"},
+    "top_k": 5,
+    "rrf_k": 60,
+    "chunk_size": 320,
+    "chunk_overlap": 64,
+    "bm25": {"k1": 1.5, "b": 0.75}
+  }
+  
