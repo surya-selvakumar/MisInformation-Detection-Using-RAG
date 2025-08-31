@@ -262,18 +262,147 @@ python -m src.evaluate ... > results_finfact.json
 
 ---
 
-## 12. License & Citation
+## 12. License
 
-**License**: MIT (update if your institution requires otherwise).
+**License**: MIT 
 
-If you use this repository, please cite:
-```bibtex
-@software{misinfo_affective_rag_2025,
-  title        = {Misinformation Detection Using Affective Information and Retrieval-Augmented Generation},
-  author       = {<Your Name>},
-  year         = {2025},
-  url          = {https://github.com/<your-user-or-org>/<your-repo>}
-}
+# Appendices — Misinformation Detection Using Affective Information and Retrieval-Augmented Generation
+
+This document provides two practical appendices to extend and reliably reproduce your results.
+
+- [Appendix A — Optional Affective Augmentation](#appendix-a--optional-affective-augmentation)
+- [Appendix B — Exact Reproduction & Seeds](#appendix-b--exact-reproduction--seeds)
+
+---
+
+## Appendix A — Optional Affective Augmentation
+
+Affective (sentiment/emotion) context can be prepended to prompts to test whether emotional tone improves explainability or class separation.
+
+### A1) Precompute affect tags (helper script)
+
+Create `scripts/compute_affect.py`:
+
+```python
+import argparse, ujson
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+import torch
+
+def load_model(name):
+    tok = AutoTokenizer.from_pretrained(name, use_fast=True)
+    mdl = AutoModelForSequenceClassification.from_pretrained(name).eval()
+    return tok, mdl
+
+@torch.no_grad()
+def score(text, tok, mdl, id2label):
+    ids = tok(text, return_tensors="pt", truncation=True, max_length=512)
+    out = mdl(**ids)
+    probs = out.logits.softmax(-1)[0].tolist()
+    label = id2label[int(out.logits.argmax(-1)[0])]
+    return label, probs
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--in", dest="inp", required=True, help="Input JSONL")
+    ap.add_argument("--out", dest="out", required=True, help="Output JSONL with affect")
+    ap.add_argument("--sent_model", default="cardiffnlp/twitter-roberta-base-sentiment-latest")
+    args = ap.parse_args()
+
+    tok_s, mdl_s = load_model(args.sent_model)
+    id2label_s = mdl_s.config.id2label
+
+    with open(args.inp, "r", encoding="utf-8") as f, open(args.out, "w", encoding="utf-8") as g:
+        for line in f:
+            ex = ujson.loads(line)
+            text = ex.get("claim") or ex.get("text") or ""
+            sent, _ = score(text, tok_s, mdl_s, id2label_s)
+            ex["affect"] = {"sentiment": sent}
+            g.write(ujson.dumps(ex, ensure_ascii=False) + "\n")
+
+if __name__ == "__main__":
+    main()
 ```
 
-**Maintainer:** <Your Name> · your.email@domain
+Run per split (example for FinFact):
+
+```bash
+python -m scripts.compute_affect --in data/finfact/train.jsonl --out data/finfact/train.affect.jsonl
+python -m scripts.compute_affect --in data/finfact/val.jsonl   --out data/finfact/val.affect.jsonl
+python -m scripts.compute_affect --in data/finfact/test.jsonl  --out data/finfact/test.affect.jsonl
+```
+
+Repeat for FinGuard if desired.
+
+### A2) Include affect in prompts (tiny code change)
+
+Open `src/utils/prompts.py` and modify `build_prompt` to accept an optional `affect` dict:
+
+```python
+def build_prompt(claim: str, evid_spans: list[str], restrict_binary: bool=False, affect: dict=None) -> str:
+    header = SYSTEM_TASK
+    if affect and affect.get("sentiment"):
+        header += f"\nContext (affect): Overall sentiment of the statement is {affect['sentiment']}."
+    lines = [header, f"Claim: {claim}"]
+    for i, ev in enumerate(evid_spans, 1):
+        lines.append(f"Evidence [{i}]: {ev}")
+    lines.append("Format your answer as: Prediction: <True/False/Not Enough Information>. "
+                 "Explanation: <2--3 sentences with citations like [1], [2]>")
+    return "\n".join(lines)
+```
+
+Then, in `src/train.py` and `src/evaluate.py`, when formatting each example, pass `affect=ex.get("affect")`. If the key is absent, the baseline behavior is unchanged.
+
+### A3) Ablation checklist
+
+- Baseline (no affect) vs. Affect-enabled prompts
+- Keep retrieval and LoRA fixed between runs
+- Report macro-F1 deltas and (FinFact) explanation quality deltas (ROUGE-L, BERTScore)
+- Sanity-check: sentiment skew across labels to detect spurious correlations
+
+---
+
+## Appendix B — Exact Reproduction & Seeds
+
+Set seeds and constrain nondeterminism to make results easier to reproduce across machines.
+
+### B1) Seed utility
+
+Add near the top of `src/train.py` (before model/dataset creation):
+
+```python
+import os, random, numpy as np, torch
+from transformers.trainer_utils import set_seed
+
+def set_all_seeds(seed=42):
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    set_seed(seed)
+    # Optional determinism (may reduce throughput):
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    # Disable TF32 for stricter numeric reproducibility:
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+
+set_all_seeds(42)
+```
+
+### B2) Environment capture
+
+Record your environment alongside results:
+
+```bash
+python -V > env.txt
+pip freeze >> env.txt
+python -c "import torch,faiss; print('torch', torch.__version__); print('faiss', getattr(faiss, '__version__', 'cpu-build'))" >> env.txt
+```
+
+### B3) Practical notes
+
+- Minor variations can still occur due to BLAS kernels, GPU models, and driver versions.
+- For multi-GPU/Accelerate/DeepSpeed training, fix seeds in all launchers and prefer static batch sizes.
+- If you re-tokenize data, keep tokenizer version constant to prevent tokenization drift.
+
